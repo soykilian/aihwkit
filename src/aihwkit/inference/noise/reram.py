@@ -313,18 +313,19 @@ class ReRamCMONoiseModel(BaseNoiseModel):
 
         """
         if t_inference == 0:
-            g_final = self._apply_poly(
-                g_prog,
-                self.coeff_dic[self.acceptance_range],
-                self.noise_scale,
+            return g_prog
+        else:
+            g_mean = self.decay_dict["mean"][0] * log(t_inference) + (
+                self.decay_dict["mean"][1] * g_prog / self.reference_drift
             )
-            return g_final.clamp(min=self.g_min)
+            sigma_relaxation = (
+                self.decay_dict["std"][0] * log(t_inference) + self.decay_dict["std"][1]
+            )
+            g_drift = g_mean + randn_like(g_prog) * sigma_relaxation
+            #TODO: implement readnoise analytical expression
+            # HERE goes readnoise
+            #...
+            g_final = g_drift #+...
+        
 
-        g_mean = self.decay_dict["mean"][0] * log(t_inference) + (
-            self.decay_dict["mean"][1] * g_prog / self.reference_drift
-        )
-        sigma_relaxation = (
-            self.decay_dict["std"][0] * log(t_inference) + self.decay_dict["std"][1]
-        )
-        g_final = g_mean + randn_like(g_prog) * sigma_relaxation
         return g_final.clamp(min=self.g_min)
