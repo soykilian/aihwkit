@@ -21,7 +21,7 @@ from aihwkit.inference.converter.conductance import (
     SinglePairConductanceConverter,
     SingleDeviceConductanceConverter,
 )
-
+import numpy
 
 class ReRamWan2022NoiseModel(BaseNoiseModel):
     r"""Noise model that was inferred from ReRam publication data.
@@ -321,5 +321,5 @@ class ReRamCMONoiseModel(BaseNoiseModel):
         sigma_read = self.read_dict["K"] * log10(g_drift) * sqrt(
             log((t_inference + self.read_dict["t_read"]) / (2 * self.read_dict["t_read"])))
         g_final = g_drift + sigma_read * randn_like(g_prog) * self.read_noise_scale
-
+        #print(numpy.average(numpy.absolute(g_final - g_prog)))
         return g_final.clamp(min=self.g_min, max=self.g_max)

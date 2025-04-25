@@ -25,6 +25,7 @@ from torchvision import datasets, transforms
 # Imports from aihwkit.
 from aihwkit.nn import AnalogConv2d, AnalogLinear, AnalogSequential
 from aihwkit.optim import AnalogSGD
+from aihwkit.inference import ReRamCMONoiseModel
 from aihwkit.simulator.configs import (
     RPUDataType,
     InferenceRPUConfig,
@@ -35,6 +36,7 @@ from aihwkit.simulator.configs import (
     BoundManagementType,
 )
 from aihwkit.inference import PCMLikeNoiseModel
+from aihwkit.simulator.parameters.io import IOParametersIRDropT
 from aihwkit.simulator.rpu_base import cuda
 
 # Check device
@@ -388,11 +390,18 @@ if __name__ == "__main__":
     my_rpu_config.mapping.max_output_size = 512
 
     my_rpu_config.noise_model = PCMLikeNoiseModel(g_max=25.0)
+    #my_rpu_config.noise_model = ReRamCMONoiseModel(g_max=88.19, g_min=9.0,
+                                                #acceptance_range=0.2)
     my_rpu_config.remap.type = WeightRemapType.CHANNELWISE_SYMMETRIC
     my_rpu_config.clip.type = WeightClipType.LAYER_GAUSSIAN
     my_rpu_config.clip.sigma = 2.5
 
     # train input clipping
+    #my_rpu_config.drift_compensation = None
+    my_rpu_config.forward = IOParametersIRDropT()
+    my_rpu_config.forward.ir_drop_g_ratio = 1.0 / 0.35 / 25e-3
+    my_rpu_config.forward.ir_drop = 0.0
+    my_rpu_config.forward.ir_drop_rs = 0.35
     my_rpu_config.forward.noise_management = NoiseManagementType.NONE
     my_rpu_config.forward.bound_management = BoundManagementType.NONE
     my_rpu_config.forward.out_bound = 10.0  # quite restrictive
@@ -412,12 +421,14 @@ if __name__ == "__main__":
     if USE_CUDA:
         analog_model = analog_model.cuda()
     print(analog_model)
+    analog_model.eval()
+    analog_model.program_analog_weights(noise_model=my_rpu_config.noise_model)
 
     opt = create_sgd_optimizer(analog_model, LEARNING_RATE)
     crit = nn.CrossEntropyLoss()
 
     # Train the model
-    results = training_phase(analog_model, crit, opt, training_data, valid_data)
+    #results = training_phase(analog_model, crit, opt, training_data, valid_data)
 
     # Test model inference over time
     t_inference_lst = [0.0, 1.0, 20.0, 1000.0, 1e5, 1e7]

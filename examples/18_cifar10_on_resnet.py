@@ -20,7 +20,8 @@ from torch import nn, Tensor, device, no_grad, manual_seed, save
 from torch import max as torch_max
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
-
+from tqdm import tqdm
+import torch
 from torchvision import datasets, transforms
 
 # Imports from aihwkit.
@@ -36,6 +37,7 @@ USE_CUDA = 0
 if cuda.is_compiled():
     USE_CUDA = 1
 DEVICE = device("cuda" if USE_CUDA else "cpu")
+print(DEVICE)
 
 # Path to store datasets
 PATH_DATASET = os.path.join(os.getcwd(), "data", "DATASET")
@@ -47,8 +49,8 @@ WEIGHT_PATH = os.path.join(RESULTS, "example_18_model_weight.pth")
 # Training parameters
 SEED = 1
 N_EPOCHS = 30
-BATCH_SIZE = 32
-LEARNING_RATE = 0.1
+BATCH_SIZE = 128
+LEARNING_RATE = 0.01
 N_CLASSES = 10
 
 # Device used in the RPU tile
@@ -173,7 +175,7 @@ def train_step(train_data, model, criterion, optimizer):
 
     model.train()
 
-    for images, labels in train_data:
+    for images, labels in tqdm(train_data):
         images = images.to(DEVICE)
         labels = labels.to(DEVICE)
         optimizer.zero_grad()
@@ -188,6 +190,7 @@ def train_step(train_data, model, criterion, optimizer):
         # Optimize weights.
         optimizer.step()
         total_loss += loss.item() * images.size(0)
+        print(f"Memory after forward: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
     epoch_loss = total_loss / len(train_data.dataset)
 
     return model, optimizer, epoch_loss
@@ -290,14 +293,15 @@ def main():
     model = create_model()
 
     # Convert the model to its analog version
-    model = convert_to_analog(model, RPU_CONFIG)
+    #model = convert_to_analog(model, RPU_CONFIG)
     # Load saved weights if previously saved
     # model.load_state_dict(load(WEIGHT_PATH))
-
+    
     if USE_CUDA:
         model.cuda()
 
-    optimizer = create_sgd_optimizer(model, LEARNING_RATE)
+    #optimizer = create_sgd_optimizer(model, LEARNING_RATE)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9, weight_decay=5e-4)
     criterion = nn.CrossEntropyLoss()
 
     print(f"\n{datetime.now().time().replace(microsecond=0)} --- " f"Started ResNet Training")

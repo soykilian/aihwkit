@@ -12,7 +12,7 @@ MVM accuracy is assessed for different times after programming.
 # pylint: disable=invalid-name
 
 # Imports from PyTorch
-from torch import nn, zeros, matmul, rand
+from torch import nn, zeros, matmul, randn, rand, sqrt, mean
 
 # Imports from aihwkit
 from aihwkit.nn.conversion import convert_to_analog
@@ -40,9 +40,11 @@ acceptance_range = 0.2
 batches = 100
 
 # initial weights
-matrix = rand(crossbar_size, crossbar_size) * 2 - 1
-
+matrix = randn(crossbar_size, crossbar_size)# * 2 - 1
+matrix = 2*(matrix - matrix.min())/(matrix.max() - matrix.min()) -1
 # probe vectors
+print(matrix.max())
+print(matrix.min())
 input_probe = rand(crossbar_size, batches) * 2 - 1
 real_MVM = matmul(input_probe.T, matrix.T)
 
@@ -115,3 +117,15 @@ for i, t_inference in enumerate(t_inferences):
     for j in range(batches):
         drifted_MVM[i, :, j] = analog_model(input_probe[:, j])
 drifted_MVM = drifted_MVM.detach()
+print(drifted_MVM[0])
+print(baseline_FP)
+rmse_t0 = sqrt(mean((drifted_MVM[0] - baseline_FP.T)**2))
+rmse_t1 = sqrt(mean((drifted_MVM[1] - baseline_FP.T)**2))
+rmse_t2 = sqrt(mean((drifted_MVM[2] - baseline_FP.T)**2))
+rmse_t3 = sqrt(mean((drifted_MVM[3] - baseline_FP.T)**2))
+rmse_t4 = sqrt(mean((drifted_MVM[4] - baseline_FP.T)**2))
+print(f"RMSE t0: {rmse_t0}")
+print(f"RMSE t = 1s: {rmse_t1}")
+print(f"RMSE t = 1h: {rmse_t2}")
+print(f"RMSE t = 24h: {rmse_t3}")
+print(f"RMSE t = 10y: {rmse_t4}")
