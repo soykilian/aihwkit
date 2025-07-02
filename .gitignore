@@ -25,6 +25,20 @@ __pycache__/
 # C extensions
 *.so
 
+*.pth
+*.th
+*.npy
+logs/
+runs/
+adv_func_mat_matteo/
+BERT_results/
+drift_compensation_NNs/
+train/
+results/
+example/results/
+*.png
+*.whl
+*.csv
 # Distribution / packaging
 .Python
 build/

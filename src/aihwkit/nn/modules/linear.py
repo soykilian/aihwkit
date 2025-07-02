@@ -82,7 +82,7 @@ class AnalogLinear(AnalogLayerBase, Linear):
             self.weight, self.bias = self.get_weights()  # type: ignore
             super().reset_parameters()
             self.set_weights(self.weight, self.bias)  # type: ignore
-            self.weight, self.bias = None, bias
+            #self.weight, self.bias = None, bias
 
     def forward(self, x_input: Tensor) -> Tensor:
         """Compute the forward pass."""

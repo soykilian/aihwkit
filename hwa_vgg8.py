@@ -11,10 +11,10 @@ SVHN dataset on Analog Network using weight scaling.
 Learning rates of η = 0.1 for all the epochs with minibatch 128.
 """
 # pylint: disable=invalid-name
-
+from tqdm import tqdm
 import os
 from datetime import datetime
-
+import copy
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -26,12 +26,27 @@ from torchvision import datasets, transforms
 
 # Imports from aihwkit.
 from aihwkit.nn import AnalogConv2d, AnalogLinear, AnalogSequential
+import torch 
 from aihwkit.optim import AnalogSGD
 from aihwkit.simulator.presets import GokmenVlasovPreset
-
-from aihwkit.simulator.configs import MappingParameter, SoftBoundsReferenceDevice
+from aihwkit.simulator.configs import MappingParameter
 from aihwkit.simulator.rpu_base import cuda
-
+from aihwkit.simulator.configs import (
+    InferenceRPUConfig,
+    NoiseManagementType,
+    BoundManagementType,
+)
+from aihwkit.simulator.parameters.io import IOParametersIRDropT
+from aihwkit.simulator.configs.utils import (
+    WeightModifierType,
+    BoundManagementType,
+    WeightClipType,
+    NoiseManagementType,
+    WeightRemapType,
+)
+from aihwkit.nn.conversion import convert_to_analog
+from aihwkit.inference import ReRamCMONoiseModel
+from aihwkit.simulator.parameters.io import IOParametersIRDropT
 # Check device
 USE_CUDA = 0
 if cuda.is_compiled():
@@ -44,19 +59,20 @@ PATH_DATASET = os.path.join("data", "DATASET")
 # Path to store results
 RESULTS = os.path.join(os.getcwd(), "results", "VGG8")
 
-
+SAVE_PATH = "/u/mvc/aihwkit/notebooks/tutorial/Models/pre-trained-vgg8.th"
+SAVE_ANALOG_PATH = "/u/mvc/aihwkit/notebooks/tutorial/Models/hwa_2t2r_vgg8.th"
 # Training parameters
-SEED = 1
-N_EPOCHS = 20
+SEED = 10
+N_EPOCHS = 60
 BATCH_SIZE = 128
-LEARNING_RATE = 0.1
+LEARNING_RATE = 1e-3
 N_CLASSES = 10
 WEIGHT_SCALING_OMEGA = 0.6  # Should not be larger than max weight.
 
 # Select the device model to use in the training. In this case we are using one of the preset,
 # but it can be changed to a number of preset to explore possible different analog devices
 mapping = MappingParameter(weight_scaling_omega=WEIGHT_SCALING_OMEGA)
-#RPU_CONFIG = GokmenVlasovPreset(mapping=mapping)
+RPU_CONFIG = GokmenVlasovPreset(mapping=mapping)
 RPU_CONFIG.runtime.offload_gradient = True
 RPU_CONFIG.runtime.offload_input = True
 
@@ -77,6 +93,73 @@ def load_images():
     return train_data, validation_data
 
 
+def create_digital_network():
+    """Create a Vgg8 inspired analog model.
+
+    Returns:
+       nn.Module: VGG8 model
+    """
+    channel_base = 48
+    channel = [channel_base, 2 * channel_base, 3 * channel_base]
+    fc_size = 8 * channel_base
+    model = torch.nn.Sequential(
+        nn.Conv2d(in_channels=3, out_channels=channel[0], kernel_size=3, stride=1, padding=1),
+        nn.ReLU(),
+        nn.Conv2d(
+            in_channels=channel[0],
+            out_channels=channel[0],
+            kernel_size=3,
+            stride=1,
+            padding=1,
+        ),
+        nn.BatchNorm2d(channel[0]),
+        nn.ReLU(),
+        nn.MaxPool2d(kernel_size=2, stride=2, padding=0, dilation=1),
+        nn.Conv2d(
+            in_channels=channel[0],
+            out_channels=channel[1],
+            kernel_size=3,
+            stride=1,
+            padding=1,
+        ),
+        nn.ReLU(),
+        nn.Conv2d(
+            in_channels=channel[1],
+            out_channels=channel[1],
+            kernel_size=3,
+            stride=1,
+            padding=1,
+        ),
+        nn.BatchNorm2d(channel[1]),
+        nn.ReLU(),
+        nn.MaxPool2d(kernel_size=2, stride=2, padding=0, dilation=1),
+        nn.Conv2d(
+            in_channels=channel[1],
+            out_channels=channel[2],
+            kernel_size=3,
+            stride=1,
+            padding=1,
+        ),
+        nn.ReLU(),
+        nn.Conv2d(
+            in_channels=channel[2],
+            out_channels=channel[2],
+            kernel_size=3,
+            stride=1,
+            padding=1,
+        ),
+        nn.BatchNorm2d(channel[2]),
+        nn.ReLU(),
+        nn.MaxPool2d(kernel_size=2, stride=2, padding=0, dilation=1),
+        nn.Flatten(),
+        nn.Linear(in_features=16 * channel[2], out_features=fc_size),
+        nn.ReLU(),
+        nn.Linear(in_features=fc_size, out_features=N_CLASSES),
+        nn.LogSoftmax(dim=1),
+    )
+    return model
+
+
 def create_analog_network():
     """Create a Vgg8 inspired analog model.
 
@@ -87,7 +170,7 @@ def create_analog_network():
     channel = [channel_base, 2 * channel_base, 3 * channel_base]
     fc_size = 8 * channel_base
     model = AnalogSequential(
-        nn.Conv2d(in_channels=3, out_channels=channel[0], kernel_size=3, stride=1, padding=1),
+        AnalogConv(in_channels=3, out_channels=channel[0], kernel_size=3, stride=1, padding=1),
         nn.ReLU(),
         AnalogConv2d(
             in_channels=channel[0],
@@ -236,7 +319,7 @@ def test_evaluation(validation_data, model, criterion):
     return model, epoch_loss, error, accuracy
 
 
-def training_loop(model, criterion, optimizer, train_data, validation_data, epochs, print_every=1):
+def training_loop(model, criterion, optimizer, train_data, validation_data, epochs, fp_baseline, print_every=1):
     """Training loop.
 
     Args:
@@ -256,11 +339,21 @@ def training_loop(model, criterion, optimizer, train_data, validation_data, epoc
     train_losses = []
     valid_losses = []
     test_error = []
+    acc_list = []
+    decrease_counter = 0
+    max_decreases = 5
+    model_snapshots = {}
 
     # Train model
-    for epoch in range(0, epochs):
+    optimizer = AnalogSGD(
+    model.parameters(), lr=LEARNING_RATE / 10.0, momentum=0.9, weight_decay=5e-4
+    )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+    pbar = tqdm(range(epochs))
+    for epoch in pbar:
         # Train_step
         model, optimizer, train_loss = train_step(train_data, model, criterion, optimizer)
+        pbar.set_description(f"Epoch {epoch} Train loss: {train_loss:.4f}")
         train_losses.append(train_loss)
 
         if epoch % print_every == (print_every - 1):
@@ -271,21 +364,40 @@ def training_loop(model, criterion, optimizer, train_data, validation_data, epoc
                 )
                 valid_losses.append(valid_loss)
                 test_error.append(error)
-
+                acc_list.append(accuracy)
             print(
                 f"{datetime.now().time().replace(microsecond=0)} --- "
                 f"Epoch: {epoch}\t"
-                f"Train loss: {train_loss:.4f}\t"
                 f"Valid loss: {valid_loss:.4f}\t"
                 f"Test error: {error:.2f}%\t"
                 f"Test accuracy: {accuracy:.2f}%\t"
             )
+            print(accuracy, fp_baseline)
+            if abs(accuracy - fp_baseline) < 0.5:
+                break
+        model_snapshots[epoch] = copy.deepcopy(model.state_dict())
+        scheduler.step()
+        if len(acc_list) > 1:
+            if accuracy < acc_list[-2]:
+                decrease_counter += 1
+            else:
+                decrease_counter = 0  # Reset if it doesn't decrease
+
+        # Stop if accuracy decreased for 5 consecutive checks
+        if decrease_counter >= max_decreases:
+            print(f"Stopping early at epoch {epoch} due to 5 consecutive accuracy drops.")
+
+            # Restore model to 5 epochs ago (if possible)
+            restore_epoch = epoch - (print_every * max_decreases)
+            if restore_epoch in model_snapshots:
+                model.load_state_dict(model_snapshots[restore_epoch])
+                print(f"Model restored to epoch {restore_epoch}")
+            else:
+                print("Warning: no snapshot available for 5 epochs ago. Using latest best model.")
+            break
+    torch.save(model.state_dict(), SAVE_ANALOG_PATH)
 
     # Save results and plot figures
-    np.savetxt(os.path.join(RESULTS, "Test_error.csv"), test_error, delimiter=",")
-    np.savetxt(os.path.join(RESULTS, "Train_Losses.csv"), train_losses, delimiter=",")
-    np.savetxt(os.path.join(RESULTS, "Valid_Losses.csv"), valid_losses, delimiter=",")
-    plot_results(train_losses, valid_losses, test_error)
 
     return model, optimizer, (train_losses, valid_losses, test_error)
 
@@ -318,6 +430,41 @@ def plot_results(train_losses, valid_losses, test_error):
     plt.savefig(os.path.join(RESULTS, "test_error.png"))
     plt.close()
 
+def gen_rpu_config(noise_model=None):
+    input_prec = 6
+    output_prec = 8
+    my_rpu_config = InferenceRPUConfig()
+    my_rpu_config.mapping.digital_bias = True # do the bias of the MVM digitally
+    #my_rpu_config.mapping.max_input_size = 256
+    #my_rpu_config.mapping.max_output_size = 256
+    my_rpu_config.forward = IOParametersIRDropT()
+    my_rpu_config.noise_model = noise_model
+    my_rpu_config.drift_compensation = None    #my_rpu_config.noise_model = PCMLikeNoiseModel(g_max=25.0)
+    #my_rpu_config.drift_compensation = GlobalDriftCompensation()
+    my_rpu_config.forward.ir_drop_g_ratio = 1.0 / 0.35 / (noise_model.g_max*1e-6) # change to 25w-6 when using PCM
+
+    #my_rpu_config.drift_compensation = None
+    my_rpu_config.modifier.std_dev = 0.06
+    my_rpu_config.modifier.type = WeightModifierType.ADD_NORMAL
+    
+    my_rpu_config.forward.inp_res = 1 / (2**input_prec - 2)
+    my_rpu_config.forward.out_res = 1 / (2**output_prec - 2)
+    my_rpu_config.forward.is_perfect = True
+    #my_rpu_config.forward.out_noise = 0.0 # Output on the current addition (?)
+    my_rpu_config.forward.ir_drop = 1.0 # TODO set to 1.0 when activating IR drop effects
+    my_rpu_config.forward.ir_drop_rs = 0.35 # Default: 0.15
+    my_rpu_config.pre_post.input_range.enable = True
+    
+    #my_rpu_config.pre_post.input_range.manage_output_clipping = True
+    my_rpu_config.pre_post.input_range.decay = 0.001
+    my_rpu_config.pre_post.input_range.input_min_percentage = 0.95
+    my_rpu_config.pre_post.input_range.output_min_percentage = 0.95
+    #my_rpu_config.forward.noise_management = NoiseManagementType.ABS_MAX # Rescale back the output with the scaling for normalizing the input
+    my_rpu_config.forward.bound_management = BoundManagementType.ITERATIVE
+    my_rpu_config.clip.type = WeightClipType.LAYER_GAUSSIAN
+    my_rpu_config.clip.sigma = 2.5
+    my_rpu_config.forward.out_bound = 10.0  # quite restric
+    return my_rpu_config
 
 def main():
     """Train a PyTorch CNN analog model with the MNIST dataset."""
@@ -330,20 +477,40 @@ def main():
     train_data, validation_data = load_images()
 
     # Prepare the model.
-    model = create_analog_network()
-    if USE_CUDA:
-        model.cuda()
-    print(model)
-
-    print(f"\n{datetime.now().time().replace(microsecond=0)} --- " f"Started Vgg8 Example")
-
-    optimizer = create_sgd_optimizer(model, LEARNING_RATE)
-
+    model = create_digital_network().to(DEVICE)
+    hwa_training = True
     criterion = nn.CrossEntropyLoss()
+    if hwa_training:
+        model.load_state_dict(torch.load(SAVE_PATH, map_location='cuda'))
+        _,_, _, fp_baseline = test_evaluation(validation_data=validation_data, model=model, criterion=criterion)
+        print("FP BASELINE ACC:", fp_baseline)
+        g_max = 50
+        g_min = 10
+        prog_overshoot = 0.0
+        single_device = False
+        acceptance_range = 0.2
+        reram_noise =ReRamCMONoiseModel(g_max=g_max, g_min=g_min,
+                                                            acceptance_range=acceptance_range,
+                                                            resistor_compensator=prog_overshoot,
+                                                            single_device=single_device)
+        rpu_config= gen_rpu_config(reram_noise)
+        a_model = convert_to_analog(model, rpu_config=rpu_config).to(DEVICE)
+        print(a_model)
+        optimizer = create_sgd_optimizer(model, LEARNING_RATE)
+        a_model, _, _ = training_loop(a_model, criterion, optimizer, train_data, validation_data, N_EPOCHS, fp_baseline)
+    else:
+        if USE_CUDA:
+            a_model.cuda()
+        print(a_model)
 
-    model, optimizer, _ = training_loop(
-        model, criterion, optimizer, train_data, validation_data, N_EPOCHS
-    )
+        print(f"\n{datetime.now().time().replace(microsecond=0)} --- " f"Started Vgg8 Example")
+
+        optimizer = create_sgd_optimizer(model, LEARNING_RATE)
+
+
+        model, optimizer, _ = training_loop(
+            model, criterion, optimizer, train_data, validation_data, N_EPOCHS
+        )
 
     print(f"{datetime.now().time().replace(microsecond=0)} --- " f"Completed Vgg8 Example")
 

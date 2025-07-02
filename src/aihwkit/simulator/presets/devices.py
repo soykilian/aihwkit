@@ -14,6 +14,7 @@ from aihwkit.simulator.configs.devices import (
     ExpStepDevice,
     LinearStepDevice,
     SoftBoundsReferenceDevice,
+    PowStepReferenceDevice
 )
 
 
@@ -53,7 +54,8 @@ class ReRamESPresetDevice(ExpStepDevice):
     dw_min_std: float = 5.0
     write_noise_std: float = 75.0
 
-
+#@dataclass 
+#class CMOReRAMPresetDevice(Pows)
 @dataclass
 class ReRamSBPresetDevice(SoftBoundsReferenceDevice):
     """Preset configuration for a single ReRAM analog resistive processing

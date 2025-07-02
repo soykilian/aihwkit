@@ -218,10 +218,18 @@ class ReRamCMONoiseModel(BaseNoiseModel):
         decay_dict: Optional[Dict[str, List]] = None,
         read_dict: Optional[Dict[str, float]] = None,
         acceptance_range: float = 2e-2,
+        resistor_compensator: float = 0.0,
+        single_device: bool = True,
+
     ):
-        g_converter = SingleDeviceConductanceConverter(
-            g_max=g_max, g_min=g_min
-        )
+        if single_device:
+            g_converter = SingleDeviceConductanceConverter(
+                g_max=g_max, g_min=g_min
+            )
+        else:
+            g_converter = SinglePairConductanceConverter(
+                g_max=g_max, g_min=g_min
+            )
         super().__init__(g_converter)
         g_max = getattr(self.g_converter, "g_max", g_max)
         g_min = getattr(self.g_converter, "g_min", g_min)
@@ -249,6 +257,7 @@ class ReRamCMONoiseModel(BaseNoiseModel):
             }
         if acceptance_range not in coeff_dict.keys():
             acceptance_range = min(coeff_dict.keys())
+        self.single_device = single_device
         self.coeff_dict = coeff_dict
         self.prog_noise_scale = prog_noise_scale
         self.read_noise_scale = read_noise_scale
@@ -256,11 +265,16 @@ class ReRamCMONoiseModel(BaseNoiseModel):
         self.decay_dict = decay_dict
         self.read_dict = read_dict
         self.acceptance_range = acceptance_range
+        self.resistor_compensator = resistor_compensator
 
     def _apply_poly(self, g_target: Tensor, coeff: List, scale: float = 1.0) -> Tensor:
         """Applied polynomial noise"""
         mat = 1
         sig_prog = coeff[0]
+        if self.single_device:
+            g_target = g_target + self.resistor_compensator# + 1.5
+        else:
+            g_target[g_target != 10.0]+= self.resistor_compensator
         for value in coeff[1:]:
             mat *= g_target  # / self.g_max
             sig_prog += mat * value

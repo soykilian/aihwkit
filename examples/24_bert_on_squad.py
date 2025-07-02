@@ -10,10 +10,13 @@
     https://github.com/huggingface/notebooks/blob/main/examples/question_answering.ipynb
 """
 # pylint: disable=invalid-name, too-many-locals, import-error
-
+from transformers import TrainerCallback
+import os
 from datetime import datetime
+from tqdm import tqdm
 from argparse import ArgumentParser
 from collections import OrderedDict, defaultdict
+from aihwkit.simulator.presets.inference import StandardHWATrainingPreset
 from numpy import log10, logspace, argsort
 from transformers.integrations import TensorBoardCallback
 
@@ -27,14 +30,13 @@ from transformers import (
 
 from torch import save as torch_save, load as torch_load
 from torch.utils.tensorboard import SummaryWriter
-
+import torch
 from evaluate import load
 from datasets import load_dataset
 
 from aihwkit.simulator.configs import (
-    InferenceRPUConfig,
-    WeightModifierType,
-    WeightClipType,
+    InferenceRPUConfig, TorchInferenceRPUConfig,
+    WeightModifierType, WeightClipType,
     WeightNoiseType,
     BoundManagementType,
     NoiseManagementType,
@@ -44,14 +46,14 @@ from aihwkit.simulator.configs import (
 )
 
 from aihwkit.simulator.presets import PresetIOParameters
-from aihwkit.inference import PCMLikeNoiseModel, GlobalDriftCompensation
+from aihwkit.inference import PCMLikeNoiseModel, GlobalDriftCompensation, ReRamCMONoiseModel
 from aihwkit.nn.conversion import convert_to_analog
 from aihwkit.optim import AnalogSGD
 
 
 # BERT model from Hugging Face model hub fine-tuned on SQuAD v1
 MODEL_NAME = "csarron/bert-base-uncased-squad-v1"
-TOKENIZER = AutoTokenizer.from_pretrained(MODEL_NAME)
+TOKENIZER = AutoTokenizer.from_pretrained(MODEL_NAME, use_fast=True)
 
 # Parse some arguments
 PARSER = ArgumentParser("Analog BERT on SQuAD example")
@@ -71,7 +73,7 @@ PARSER.add_argument(
     default=datetime.now().strftime("%Y%m%d-%H%M%S"),
     type=str,
 )
-PARSER.add_argument("-t", "--train_hwa", help="Use Hardware-Aware training", action="store_true")
+PARSER.add_argument("-t", "--train_hwa", help="Use Hardware-Aware training", action="store_false")
 PARSER.add_argument(
     "-L", "--load", help="Use when loadiung from training checkpoint", action="store_true"
 )
@@ -103,6 +105,7 @@ if ARGS.wandb:
     SWEEP_ID = wandb.sweep(sweep=SWEEP_CONFIG, project="bert-weight-noise-experiment")
 
 # max length and stride specific to pretrained model
+MODEL_NAME = "csarron/bert-base-uncased-squad-v1"
 MAX_LENGTH = 320
 DOC_STRIDE = 128
 
@@ -120,18 +123,18 @@ def create_ideal_rpu_config(tile_size=512):
             max_output_size=0,
         ),
         forward=PresetIOParameters(is_perfect=True),
-        noise_model=PCMLikeNoiseModel(prog_noise_scale=0.0, read_noise_scale=0.0, drift_scale=0.0),
+        noise_model=PCMLikeNoiseModel(),
         drift_compensation=None,
     )
     return rpu_config
 
 
-def create_rpu_config(modifier_noise, tile_size=512, dac_res=256, adc_res=256):
+def create_rpu_config(modifier_noise, tile_size=512, dac_res=1024, adc_res=1024):
     """Create RPU Config emulated typical PCM Device"""
     if ARGS.wandb:
         modifier_noise = wandb.config.modifier_noise
 
-    rpu_config = InferenceRPUConfig(
+    rpu_config = TorchInferenceRPUConfig(
         clip=WeightClipParameter(type=WeightClipType.FIXED_VALUE, fixed_value=1.0),
         modifier=WeightModifierParameter(
             rel_to_actual_wmax=True, type=WeightModifierType.ADD_NORMAL, std_dev=modifier_noise
@@ -145,18 +148,13 @@ def create_rpu_config(modifier_noise, tile_size=512, dac_res=256, adc_res=256):
             max_input_size=tile_size,
             max_output_size=0,
         ),
-        forward=PresetIOParameters(
-            w_noise_type=WeightNoiseType.PCM_READ,
-            w_noise=0.0175,
-            inp_res=dac_res,
-            out_res=adc_res,
-            out_bound=10.0,
-            out_noise=0.04,
-            bound_management=BoundManagementType.ITERATIVE,
-            noise_management=NoiseManagementType.ABS_MAX,
+        forward=PresetIOParameters(is_perfect=True
         ),
-        noise_model=PCMLikeNoiseModel(),
-        drift_compensation=GlobalDriftCompensation(),
+        noise_model=ReRamCMONoiseModel(g_max=90, g_min=10,
+                                                        acceptance_range=0.2,
+                                                        resistor_compensator=0.0,
+                                                        single_device=True),
+        drift_compensation=None,
     )
     return rpu_config
 
@@ -165,12 +163,11 @@ def create_model(rpu_config):
     """Return Question Answering model and whether or not it was loaded from a checkpoint"""
 
     model = AutoModelForQuestionAnswering.from_pretrained(MODEL_NAME)
-
     if not ARGS.digital:
         model = convert_to_analog(model, rpu_config)
         model.remap_analog_weights()
+        #model.load_state_dict(torch.load("/u/mvc/saved_chkpt.pth", map_location='cuda'))
 
-    print(model)
     return model
 
 
@@ -441,23 +438,55 @@ def create_datasets():
 
 def create_optimizer(model):
     """Create the analog-aware optimizer"""
-    optimizer = AnalogSGD(model.parameters(), lr=ARGS.learning_rate)
+    optimizer = AnalogSGD(model.parameters(), lr=ARGS.learning_rate,  momentum=0.9, weight_decay=5e-4)
 
     optimizer.regroup_param_groups(model)
 
     return optimizer
 
+class SaveModelCallback(TrainerCallback):
+    def on_epoch_end(self, args, state, control, **kwargs):
+        output_dir = os.path.join(args.output_dir, f"checkpoint-epoch-{int(state.epoch)}")
+        kwargs["model"].save_pretrained(output_dir)
+        if kwargs.get("tokenizer", None):
+            kwargs["tokenizer"].save_pretrained(output_dir)
+        print(f"Model saved at {output_dir}")
+        return control
+
+class EpochProgressCallback(TrainerCallback):
+    def on_epoch_begin(self, args, state, control, **kwargs):
+        print(f"\n🔁 Starting epoch {int(state.epoch) + 1}/{int(args.num_train_epochs)}")
+        self.epoch_bar = tqdm(total=state.max_steps // args.num_train_epochs, desc=f"Epoch {int(state.epoch) + 1}", leave=False)
+        self.epoch_loss = 0.0
+        self.epoch_steps = 0
+
+    def on_step_end(self, args, state, control, logs=None, **kwargs):
+        loss = logs.get("loss")
+        if loss is not None:
+            self.epoch_loss += loss
+            self.epoch_steps += 1
+        self.epoch_bar.update(1)
+
+    def on_epoch_end(self, args, state, control, **kwargs):
+        self.epoch_bar.close()
+        avg_loss = self.epoch_loss / self.epoch_steps if self.epoch_steps > 0 else float("nan")
+        print(f"\n✅ Epoch {int(state.epoch) + 1} completed. Avg loss: {avg_loss:.4f}\n")
 
 def make_trainer(model, optimizer, tokenized_data):
     """Create the Huggingface Trainer"""
     training_args = TrainingArguments(
         output_dir="./",
         save_strategy="no",
-        per_device_train_batch_size=4,
-        per_device_eval_batch_size=4,
-        num_train_epochs=3,
-        weight_decay=0.001,
+        evaluation_strategy="epoch",
+        per_device_train_batch_size=128,
+        per_device_eval_batch_size=128,
+        num_train_epochs=80,
+        lr_scheduler_type='cosine',
+        learning_rate = 1e-3,
+        warmup_steps=100,
         no_cuda=False,
+        dataloader_num_workers =32,
+        report_to=[],
     )
 
     collator = DefaultDataCollator()
@@ -473,7 +502,7 @@ def make_trainer(model, optimizer, tokenized_data):
         eval_dataset=tokenized_data["validation"],
         tokenizer=TOKENIZER,
         optimizers=(optimizer, None),
-        callbacks=[TensorBoardCallback(writer)],
+        #callbacks=[TensorBoardCallback(writer)],
     )
 
     return trainer, writer
@@ -504,10 +533,6 @@ def do_inference(model, trainer, squad, eval_data, writer, max_inference_time=1e
         writer.add_scalar("val/f1", f1, t_inference)
         writer.add_scalar("val/exact_match", exact_match, t_inference)
 
-        if ARGS.wandb:
-            wandb.log({"t_inference": t_inference, "f1": f1, "exact_match": exact_match})
-
-        print(f"Exact match: {exact_match: .2f}\t" f"F1: {f1: .2f}\t" f"Drift: {t_inference: .2e}")
 
     model.eval()
 
@@ -515,22 +540,34 @@ def do_inference(model, trainer, squad, eval_data, writer, max_inference_time=1e
 
     ground_truth = [{"id": ex["id"], "answers": ex["answers"]} for ex in squad["validation"]]
 
-    t_inference_list = logspace(0, log10(float(max_inference_time)), n_times).tolist()
+    t_inference_list = [1, 60*10, 3600, 3600 * 24, 3600 * 24*7, 3600 * 24 *30, 3600 * 24 *365, 3600 * 24 *365*2, 3600 * 24 *365*5, 3600 * 24 * 365 * 10] 
+    #t_inference_list = [1] 
 
     # Get the initial metrics
-    f1, exact_match = predict()
-    write_metrics(f1, exact_match, 0.0)
-
+    #f1, exact_match = predict()
+    #write_metrics(f1, exact_match, 0.0)
+    f1_times = []
+    exact_match_times = []
     for t_inference in t_inference_list:
+        print(t_inference)
         model.drift_analog_weights(t_inference)
         f1, exact_match = predict()
-        write_metrics(f1, exact_match, t_inference)
+        f1_times.append(f1)
+        exact_match_times.append(exact_match)
+        print(f"Exact match: {exact_match: .2f}\t" f"F1: {f1: .2f}\t" f"Drift: {t_inference: .2e}")
+        #write_metrics(f1, exact_match, t_inference)
+    f1_times = torch.Tensor(f1_times)
+    exact_match_times = torch.Tensor(exact_match_times)
 
 
 def main():
     """Provide the lambda function for WandB sweep. If WandB is not used, then this
     is what is executed in the job
     """
+    print("HWA:", ARGS.train_hwa)
+    print("RPU config ideal:", ARGS.ideal)
+    print("DIGITAL MODEL:", ARGS.digital)
+    print("LOAD from checkpoint", ARGS.load)
     if ARGS.wandb:
         wandb.init()
 
@@ -539,22 +576,22 @@ def main():
         rpu_config = create_ideal_rpu_config()
     else:
         rpu_config = create_rpu_config(modifier_noise=ARGS.noise)
-
+    #rpu_config = StandardHWATrainingPreset()
     model = create_model(rpu_config)
 
     squad, tokenized_data, eval_data = create_datasets()
+    #tokenized_data["train"] = tokenized_data["train"].select(range(5000))
     optimizer = create_optimizer(model)
     trainer, writer = make_trainer(model, optimizer, tokenized_data)
-
     if ARGS.load:
-        print(f"Load model from '{ARGS.checkpoint}'.")
-        model.load_state_dict(torch_load(ARGS.checkpoint))
+        model.load_state_dict(torch.load("/u/mvc/saved_chkpt_test_keys.pth", map_location='cuda'))
 
     # Do hw-aware training if in analog domain and the model isn't loaded from
     # an existing checkpoint
     if ARGS.train_hwa and not ARGS.digital and not ARGS.load:
         trainer.train()
-        torch_save(model.state_dict(), ARGS.checkpoint)
+        torch_save(model.state_dict(), "/u/mvc/bert_hwa2tpth")
+    print("Starting inference")
     do_inference(model, trainer, squad, eval_data, writer)
 
 

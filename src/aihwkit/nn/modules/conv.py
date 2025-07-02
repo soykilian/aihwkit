@@ -9,7 +9,7 @@
 # pylint: disable=too-many-arguments, too-many-locals, too-many-instance-attributes
 
 from typing import Optional, Tuple, Union, List, Type
-
+import torch
 from torch import Tensor, arange, cat, float64, int32, ones
 from torch.autograd import no_grad
 from torch.nn.functional import pad, unfold
@@ -113,12 +113,27 @@ class _AnalogConvNd(AnalogLayerBase, _ConvNd):
 
     def reset_parameters(self) -> None:
         """Reset the parameters (weight and bias)."""
+        """
+        if hasattr(self, "analog_module"):
+            bias = self.bias
+            self.weight, self.bias = self.get_weights()  # type: ignore
+            if isinstance(self.bias, torch.nn.Parameter):
+                cached_bias = self.bias.detach().clone()
+            else:
+                cached_bias = None
+            super().reset_parameters()
+            self.set_weights(self.weight, self.bias)
+            self.weight = None
+            with torch.no_grad():
+                if isinstance(self.bias, torch.nn.Parameter) and cached_bias is not None:
+                    self.bias.data.copy_(cached_bias)
+        """
         if hasattr(self, "analog_module"):
             bias = self.bias
             self.weight, self.bias = self.get_weights()  # type: ignore
             super().reset_parameters()
             self.set_weights(self.weight, self.bias)
-            self.weight, self.bias = None, bias
+            self.weight = None
 
     @no_grad()
     def _recalculate_indexes(self, x_input: Tensor) -> None:

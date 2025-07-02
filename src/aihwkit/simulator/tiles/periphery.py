@@ -9,7 +9,7 @@
 # pylint: disable=too-many-lines
 
 from typing import Optional, Tuple, Union, Any, List
-from numpy import array
+from numpy import array, log
 
 from torch import (
     Tensor,
@@ -26,6 +26,7 @@ from torch import (
     zeros,
     logical_or,
 )
+import torch
 
 from torch import device as torch_device
 from torch import max as torch_max
@@ -38,6 +39,7 @@ from aihwkit.simulator.tiles.base import BaseTile, SimulatorTileWrapper, Simulat
 
 from aihwkit.simulator.parameters.mapping import MappingParameter
 from aihwkit.simulator.parameters.pre_post import PrePostProcessingRPU, InputRangeParameter
+from aihwkit.inference.noise.config import SimulationContextWrapper
 
 
 class TileWithPeriphery(BaseTile, SimulatorTileWrapper):
@@ -853,6 +855,9 @@ class TileWithPeriphery(BaseTile, SimulatorTileWrapper):
         x_output = self.tile.forward(
             x_input, self.analog_bias, self.in_trans, self.out_trans, is_test, self.non_blocking
         )
+        if SimulationContextWrapper.t_inference !=0.0:
+            print(SimulationContextWrapper.t_inference)
+            x_output -= (-0.0023*log(SimulationContextWrapper.t_inference))*torch.sum(x_input, dim=-1).unsqueeze(-1)
         return self.post_forward(
             x_output, 0 if self.out_trans else x_output.dim() - 1, is_test, ctx
         )
@@ -1041,7 +1046,7 @@ class TileWithPeriphery(BaseTile, SimulatorTileWrapper):
 
         """
         if self.mapping_scales is not None:
-            self.mapping_scales = self.mapping_scales.cpu()
+            self.mapping_scales = self.mapping_scales
         return self
 
     def is_indexed(self) -> bool:
@@ -1183,6 +1188,10 @@ class TileWithPeriphery(BaseTile, SimulatorTileWrapper):
             None
         """
         x_input, d_input = self.pre_update(x_input, 1, d_input, 1)
+        print(torch.isnan(d_input).any())
+        print(torch.isinf(d_input).any())
+        print("X:", x_input.shape)
+        print("d:", d_input.shape)
         return self.tile.update_indexed(x_input, d_input, self.non_blocking)  # type: ignore
 
     def set_learning_rate(self, learning_rate: Optional[float]) -> None:
