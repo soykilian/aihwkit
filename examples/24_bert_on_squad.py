@@ -148,7 +148,13 @@ def create_rpu_config(modifier_noise, tile_size=512, dac_res=1024, adc_res=1024)
             max_input_size=tile_size,
             max_output_size=0,
         ),
-        forward=PresetIOParameters(is_perfect=True
+        forward=PresetIOParameters(
+            inp_res=dac_res,
+            out_res=adc_res,
+            out_bound=10.0,
+            out_noise=0.04,
+            bound_management=BoundManagementType.ITERATIVE,
+            noise_management=NoiseManagementType.ABS_MAX,
         ),
         noise_model=ReRamCMONoiseModel(g_max=90, g_min=10,
                                                         acceptance_range=0.2,
@@ -479,8 +485,8 @@ def make_trainer(model, optimizer, tokenized_data):
         save_strategy="no",
         evaluation_strategy="epoch",
         per_device_train_batch_size=128,
-        per_device_eval_batch_size=128,
-        num_train_epochs=80,
+        per_device_eval_batch_size=512,
+        num_train_epochs=70,
         lr_scheduler_type='cosine',
         learning_rate = 1e-3,
         warmup_steps=100,
@@ -590,9 +596,9 @@ def main():
     # an existing checkpoint
     if ARGS.train_hwa and not ARGS.digital and not ARGS.load:
         trainer.train()
-        torch_save(model.state_dict(), "/u/mvc/bert_hwa2tpth")
-    print("Starting inference")
-    do_inference(model, trainer, squad, eval_data, writer)
+        torch_save(model.state_dict(), "/u/mvc/bert_hwa_quantization.pth")
+    #print("Starting inference")
+    #do_inference(model, trainer, squad, eval_data, writer)
 
 
 if ARGS.wandb:
